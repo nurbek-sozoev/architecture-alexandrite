@@ -1,0 +1,53 @@
+@startuml
+hide footbox
+skinparam defaultTextAlignment left
+
+actor Operator
+actor Partner
+participant MES_UI as "MES UI"
+participant MES_API as "MES API"
+participant Partner_API as "Partner API"
+participant Redis as "Redis Cache"
+database Postgres as "Postgres DB"
+
+== Получение списка заказов (Cache-Aside + Refresh-Ahead) ==
+Operator -> MES_UI : Open dashboard
+MES_UI -> MES_API : GET /orders?status=new&page=1
+MES_API -> Redis : GET mes:orders:new:page:1
+alt cache hit
+  Redis --> MES_API : list
+  MES_API --> MES_UI : 200 list
+else cache miss
+  MES_API -> Postgres : SELECT last orders
+  Postgres --> MES_API : list
+  MES_API -> Redis : SET mes:orders:new:page:1 TTL=30s
+  MES_API --> MES_UI : 200 list
+end
+...
+MES_API -> Redis : PTTL mes:orders:new:page:2
+alt ttl < 10s
+  MES_API -> Postgres : background refresh
+  MES_API -> Redis : SET ... TTL=30s (refresh-ahead)
+end
+
+== Изменение статуса заказа (Write-Through) ==
+Operator -> MES_UI : Click "Start manufacturing"
+MES_UI -> MES_API : POST /orders/{id}/status STARTED
+MES_API -> Postgres : UPDATE status RETURNING order
+Postgres --> MES_API : ok + updated order
+MES_API -> Redis : SET mes:order:{id} updated order
+MES_API --> MES_UI : 200 updated
+ 
+== Получение статуса партнером (Write-Through) ==
+Partner -> Partner_API : GET /public/orders/{id}/status
+Partner_API -> Redis : GET mes:order:{id}
+alt cache hit
+  Redis --> Partner_API : order
+  Partner_API --> Partner : 200 status
+else cache miss
+  Partner_API -> Postgres : SELECT order by id
+  Postgres --> Partner_API : order
+  Partner_API -> Redis : SET mes:order:{id} order
+  Partner_API --> Partner : 200 status
+end
+@enduml
